@@ -1,6 +1,8 @@
 #!/usr/bin/env python2.7
 #from typing import Counter
+from tkinter import Y
 from sklearn import linear_model
+from sklearn.cluster import KMeans
 import rospy
 from sss_object_detection.consts import ObjectID
 #from tf.transformations import euler_from_quaternion
@@ -26,15 +28,27 @@ from std_msgs.msg import Float64, Header, Bool, Empty
 class sss_detection_listener:
     def __init__(self, robot_name):
 
+        #kristineberg coordinates
+        self.MOB1 = [643815, 6459258]    #top left
+        self.MOB2 = [643806, 6459228]   #bottom left
+        self.MOB3 = [643816, 6459230]   #bottom center
+        self.MOB4 = [643832, 6459225]   #bottom right
+        self.MOB5 = [643830, 6459257]   #top right
+        self.slope_algae_rope = (self.MOB1[1]-self.MOB2[1])/(self.MOB1[0]-self.MOB2[0])
+
         self.rope_pose_x = []
         self.rope_pose_y = []
         self.detection_x = []
         self.detection_y = []
+        self.class0 = []
+        self.class1 = []
 
         self.wp_x = []
         self.wp_y = []
         self.no_detection = 0
         
+
+
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
@@ -132,7 +146,7 @@ class sss_detection_listener:
             for i in range(30):
                 if self.detection_x[-i] == None:
                     self.no_detection += 1
-            if self.no_detection > 20:
+            if self.no_detection > 24:
                 print('here3')
                 self.no_detection = 0
                 pass
@@ -142,27 +156,93 @@ class sss_detection_listener:
 
     def publish_waypoint(self):
         self.counter += 1
-        #print('in publish_waypoint')
-        # self.rope_pose_x = [x for x in self.rope_pose_x if x is not None]
-        #temp_x = []
-        #temp_y = []
-        #for i in range(30):
-        #    if self.rope_pose_x[i] is not None:
-        #        temp_x.append(self.rope_pose_x[i])
-        #        temp_y.append(self.rope_pose_y[i])
-        #self.rope_pose_x = temp_x
-        #self.rope_pose_y = temp_y
 
         if len(self.rope_pose_x) <=  50 and len(self.rope_pose_x) >= 10:
-            X= np.array(self.rope_pose_x)
-            y= np.array(self.rope_pose_y)
-            #print('self.rope_pose: {}'.format(self.rope_pose))
+            #X= np.array(self.rope_pose_x)
+            #y= np.array(self.rope_pose_y)
+            X = [[x, y] for x, y in zip(self.rope_pose_x, self.rope_pose_y)]
         else: 
-            X= np.array(self.rope_pose_x[-50:])
-            y= np.array(self.rope_pose_y[-50:])
-            #print('self.rope_pose: {}'.format(self.rope_pose))
-        #print('X',X)
+            #X= np.array(self.rope_pose_x[-50:])
+            #y= np.array(self.rope_pose_y[-50:])
+            X = [[x, y] for x, y in zip(self.rope_pose_x[-50:], self.rope_pose_y[-50:])]
 
+        kmeans = KMeans(n_clusters=2, random_state=0).fit(X)
+        prediction_class = kmeans.predict(X)
+        for km in range(len(X)):
+            if prediction_class[km] == 0:
+                self.class0.append(X[km])
+            if prediction_class[km] == 1:
+                self.class1.append(X[km])
+        X0, y0 = zip(*self.class0)
+        X1, y1 = zip(*self.class1)
+        slope0, c0 = ransac_slope(X0, y0)
+        slope1, c1 = ransac_slope(X1, y1)
+
+        if (self.slope_algae_rope - slope0) > (self.slope_algae_rope - slope1):
+            m_slope = slope0
+            c_intercept = c0
+        else:
+            m_slope = slope1
+            c_intercept = c1
+        
+
+        print('SLOPEEEEEEEEEEEEEE',m_slope)
+
+        
+        # get pose of SAM
+        x_auv=self.current_pose.pose.position.x
+        y_auv=self.current_pose.pose.position.y
+        print('x_auv',x_auv)
+        # auv_yaw_r = euler_from_quaternion([self.current_pose.pose.orientation.x, self.current_pose.pose.orientation.y,
+        #                                         self.current_pose.pose.orientation.z, self.current_pose.pose.orientation.w])[2]
+
+        auv_yaw=self.rawr*180/math.pi
+                #caulate waypoint
+              
+        Waypoint_x, Waypoint_y = calculate_waypoint(x_auv, y_auv, auv_yaw, m_slope, c_intercept)
+        print('counter',self.counter)
+        print('wp',Waypoint_x)
+
+        self.wp_x.append(float(Waypoint_x))
+        self.wp_y.append(float(Waypoint_y))
+        #msg.pose.pose.position.x = float(Waypoint_x)
+        #msg.pose.pose.position.y = float(Waypoint_y)
+        
+        #msg.pose = self.rope_pose[-1]
+
+        #msg.pose.pose.orientation.x = 0
+        #msg.pose.pose.orientation.y = 0
+
+
+        if self.counter % 10 == 0:
+            msg = GotoWaypoint()
+            msg.travel_depth = -1
+            msg.goal_tolerance = 2
+            msg.z_control_mode = GotoWaypoint.Z_CONTROL_DEPTH
+            msg.speed_control_mode = GotoWaypoint.SPEED_CONTROL_RPM
+            msg.travel_rpm = 1000
+            #msg.speed_control_mode = GotoWaypoint.SPEED_CONTROL_SPEED
+            #msg.travel_speed = 1.0
+            msg.pose.header.frame_id = 'utm'
+            msg.pose.header.stamp = rospy.Time(0)
+
+            msg.pose.pose.position.x = np.mean(self.wp_x)
+            msg.pose.pose.position.y = np.mean(self.wp_y)
+        #msg.pose.pose.position.x = Waypoint_x
+        #msg.pose.pose.position.y = Waypoint_y
+            self.waypoint_pub.publish(msg)
+            print('PUBLISHED WAYPOINT')
+            print(msg)
+            #self.ax.scatter(msg.pose.pose.position.x,msg.pose.pose.position.y)
+            #self.fig.show()
+        #if self.counter % 10 == 0:
+            self.wp_x = []
+            self.wp_y = []
+
+        self.enable.data = True
+        self.enable_pub.publish(self.enable)
+
+    def ransac_slope(X, y):
         ransac=linear_model.RANSACRegressor()
         Xr=X.reshape(-1,1)
         #print(Xr[0])
@@ -184,38 +264,9 @@ class sss_detection_listener:
         m_slope=(yr[max_xindex[0]]-yr[min_xindex[0]])/(Xr[max_xindex[0]]-Xr[min_xindex[0]])
         c_intercept=yr[max_xindex[0]]-m_slope*Xr[max_xindex[0]]
 
-        print('slope',m_slope)
-        # ransac = RANSACRegressor(LinearRegression(), 
-        #     max_trials=100, 
-        #     min_samples=10, 
-        #     residual_threshold=0.001)
-        # ransac.fit(X,y)
-        # inlier_mask = ransac.inlier_mask_
-        # outlier_mask = np.logical_not(inlier_mask)
+        return m_slope, c_intercept
 
-
-        #     #    predicted_intercept_map =PointStamped()
-        #     #    predicted_intercept_map.header.frame_id = "map"
-        #     #    predicted_intercept_map.header.stamp = rospy.Time(0)
-        # x_pred = np.float64(X[len(X)-1]+5.0)
-        #     #    #self.counter = int(x_pred)
-        # m_slope = ransac.estimator_.coef_[0]
-        #     #    #print >>sys.stderr,'m_slope: ' % m_slope
-        # c_intercept = ransac.estimator_.intercept_
-        #     #    #print >>sys.stderr,'c_intercept: ' % c_intercept
-            
-        # y_pred = (x_pred*m_slope) + c_intercept
-        
-        # get pose of SAM
-        x_auv=self.current_pose.pose.position.x
-        y_auv=self.current_pose.pose.position.y
-        print('x_auv',x_auv)
-        # auv_yaw_r = euler_from_quaternion([self.current_pose.pose.orientation.x, self.current_pose.pose.orientation.y,
-        #                                         self.current_pose.pose.orientation.z, self.current_pose.pose.orientation.w])[2]
-
-        auv_yaw=self.rawr*180/math.pi
-                #caulate waypoint
-              
+    def calculate_waypoint(x_auv, y_auv, auv_yaw, m_slope, c_intercept):
         if m_slope<20 and m_slope>-20:
             x_distanGo=5/(1+m_slope**2)
             if y_auv > m_slope*x_auv + c_intercept:
@@ -249,56 +300,8 @@ class sss_detection_listener:
             else:
                 Waypoint_x=(x_togo)*2/3+vpoint_x
                 Waypoint_y=-(y_togo)*2/3+vpoint_y
-        print('counter',self.counter)
-        print('wp',Waypoint_x)
 
-        self.wp_x.append(float(Waypoint_x))
-        self.wp_y.append(float(Waypoint_y))
-        #msg.pose.pose.position.x = float(Waypoint_x)
-        #msg.pose.pose.position.y = float(Waypoint_y)
-        
-        #msg.pose = self.rope_pose[-1]
-
-        #msg.pose.pose.orientation.x = 0
-        #msg.pose.pose.orientation.y = 0
-
-
-        if self.counter % 10 == 0:
-        #if self.counter % 20 == 0:
-            #if np.mean(self.wp_x) == 0:
-            #    pass
-            #else:
-                #msg.pose.pose.position.x = np.mean(self.wp_x)
-                #msg.pose.pose.position.y = np.mean(self.wp_y)
-                #self.waypoint_pub.publish(msg)
-            #print('self.wp_x',self.wp_x)
-        
-            msg = GotoWaypoint()
-            msg.travel_depth = -1
-            msg.goal_tolerance = 2
-            msg.z_control_mode = GotoWaypoint.Z_CONTROL_DEPTH
-            #msg.speed_control_mode = GotoWaypoint.SPEED_CONTROL_RPM
-            #msg.travel_rpm = 1000
-            msg.speed_control_mode = GotoWaypoint.SPEED_CONTROL_SPEED
-            msg.travel_speed = 1.0
-            msg.pose.header.frame_id = 'utm'
-            msg.pose.header.stamp = rospy.Time(0)
-
-            msg.pose.pose.position.x = np.mean(self.wp_x)
-            msg.pose.pose.position.y = np.mean(self.wp_y)
-        #msg.pose.pose.position.x = Waypoint_x
-        #msg.pose.pose.position.y = Waypoint_y
-            self.waypoint_pub.publish(msg)
-            print('PUBLISHED WAYPOINT')
-            print(msg)
-            #self.ax.scatter(msg.pose.pose.position.x,msg.pose.pose.position.y)
-            #self.fig.show()
-        #if self.counter % 10 == 0:
-            self.wp_x = []
-            self.wp_y = []
-
-        self.enable.data = True
-        self.enable_pub.publish(self.enable)
+        return Waypoint_x, Waypoint_y
 
 
 def main():
