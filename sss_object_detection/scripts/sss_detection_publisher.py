@@ -22,7 +22,11 @@ def main():
     detector = SSSDetector(robot_name=robot_name,
                            object_height=object_height,
                            water_depth=water_depth)
-
+    ping_before, ping_after = detector.return_ping()
+    rospy.loginfo('PING BEFORE')
+    print(ping_before)
+    print('PING AFTER')
+    print(ping_after)
     while not rospy.is_shutdown():
         rospy.spin()
 

@@ -1,6 +1,16 @@
+from typing_extensions import dataclass_transform
 import numpy as np
 import ruptures as rpt
 from sss_object_detection.consts import ObjectID
+from scipy.ndimage import gaussian_filter
+from scipy import ndimage, misc
+#import noisereduce as nr
+from scipy.signal import savgol_filter
+from PIL import Image, ImageEnhance
+import matplotlib.pyplot as plt
+from pandas import DataFrame
+
+from smarc_msgs.msg import Sidescan
 
 
 class CPDetector:
@@ -8,6 +18,8 @@ class CPDetector:
     def __init__(self):
         self.buoy_width = 19
         self.min_mean_diff_ratio = 1.55
+        self.ping_before = 0
+        self.ping_after = 0
 
     def detect(self, ping):
         """Detection returns a dictionary with key being ObjectID and
@@ -30,7 +42,7 @@ class CPDetector:
                 'pos': buoy[0][0],
                 'confidence': buoy[1]
             }
-        return detections
+        return detections, self.ping_before, self.ping_after
 
     def _compare_region_with_surrounding(self, ping, bkps, window_size=50):
         region_mean = np.mean(ping[bkps[0]:bkps[1]])
@@ -66,6 +78,11 @@ class CPDetector:
                                                  end_idx=nadir_idx,
                                                  width=self.buoy_width,
                                                  n_bkps=2)
+        
+        if len(bkps) != 2:
+            # Return None if the bkps list does not have the expected number of elements
+            print('HERE')
+            return None
 
         # Check whether the segmentation is likely to be a buoy
         if bkps[1] - bkps[0] > self.buoy_width * 2 or bkps[1] - bkps[
@@ -93,8 +110,45 @@ class CPDetector:
         """Use window sliding method to segment the input numpy array from
         start_idx to end_idx into (n_bkps + 1) segments. Return a list of
         suggested break points."""
+        #ping = nr.reduce_noise(y=ping, sr=1,time_mask_smooth_ms=50)
+        #ping = savgol_filter(ping, 5, 4)
+        #ping = gaussian_filter(ping, sigma=5)
+        #ping = ndimage.percentile_filter(ping, percentile=20, size=20)
 
-        algo = rpt.Window(width=width, model='l2').fit(ping[start_idx:end_idx])
+
+        # temp = []
+        # indexer = 100
+        # new_ping = ping
+        # for i in range(len(ping)):
+        #     for k in range(i-indexer, i+indexer+1):
+        #         if (k > -1) and (k < len(ping)):
+        #             temp.append(ping[k])
+        #     temp.remove(ping[i])
+        #     max_value = max(temp)
+        #     min_value = min(temp)
+        #     if ping[i] > max_value:
+        #         new_ping[i] = max_value
+        #     elif ping[i] < min_value:
+        #         new_ping[i] = min_value
+        #print(ping, 'PING WITH NOISE')
+        #np.save('ping_noise', ping)
+        #ping = DataFrame(ping)
+        #ping.to_csv('print_ping.csv')
+        #ping.to_numpy()
+        #self.ping_before = np.array(ping, dtype=np.float32)
+        # self.ping_before = ping
+        # ping = ndimage.median_filter(ping, size=40)       
+        # ping_image = Image.fromarray(ping)
+        # enhancer = ImageEnhance.Contrast(ping_image)
+        # factor = 2 #increase contrast
+        # ping_image_enhanced = enhancer.enhance(factor)
+        # ping = np.asarray(ping_image_enhanced)
+        #print(ping, 'PING WITHOUT NOISE')
+        #ping = gaussian_filter(ping, sigma=10)
+        # self.ping_after = np.array(ping, dtype=np.uint8)
+
+
+        algo = rpt.Window(width=width, model='l2', min_size=1).fit(ping[start_idx:end_idx])
         bkps = algo.predict(n_bkps=n_bkps)
         bkps = [bkps[i] + start_idx for i in range(len(bkps))]
         return bkps

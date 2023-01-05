@@ -1,6 +1,8 @@
 #!/usr/bin/env python2.7
 #from typing import Counter
+from tkinter import Y
 from sklearn import linear_model
+from sklearn.cluster import KMeans
 import rospy
 from sss_object_detection.consts import ObjectID
 #from tf.transformations import euler_from_quaternion
@@ -26,16 +28,30 @@ from std_msgs.msg import Float64, Header, Bool, Empty
 class sss_detection_listener:
     def __init__(self, robot_name):
 
+        #kristineberg coordinates
+        #self.MOB1 = [643815, 6459258]    #top left
+        #self.MOB2 = [643806, 6459228]   #bottom left
+        #self.MOB3 = [643816, 6459230]   #bottom center
+        #self.MOB4 = [643832, 6459225]   #bottom right
+        #self.MOB5 = [643830, 6459257]   #top right
+
+        #algae_small_world coordinates
+        self.MOB1 = [643800.54 + 4, 6459252.08 -5]    #buoy corner1
+        self.MOB2 = [643800.54 + 4, 6459252.08 +5]    #buoy corner2
+        self.MOB4 = [643800.54 + 14, 6459252.08 -5]   #bottom corner3
+        self.MOB5 = [643800.54 + 14, 6459252.08 +5]   #bottom corner4
+        #self.MOB3 = [643800.54 + 9, 643800.54 -5]   #mid buoy
+
+        self.slope_algae_rope = (self.MOB2[1]-self.MOB4[1])/(self.MOB2[0]-self.MOB4[0])
+
+        self.clustering_flag = False
+
         self.rope_pose_x = []
         self.rope_pose_y = []
         self.detection_x = []
         self.detection_y = []
-
-
-        self.list_x = []
-        self.list_y =[]
-        self.list_wp_x = []
-        self.list_wp_y =[]
+        self.class0 = []
+        self.class1 = []
 
         self.wp_x = []
         self.wp_y = []
@@ -57,15 +73,9 @@ class sss_detection_listener:
         self.enable_pub = rospy.Publisher('/sam/algae_farm/enable', Bool, queue_size=1)
         self.enable = Bool()
         self.enable.data = False
+        print(self.waypoint_topic)
 
-        self.TOSAVE_AUVx = []
-        self.TOSAVE_AUVy = []
-        self.TOSAVE_ROPEx = []
-        self.TOSAVE_ROPEy = []
-        self.TOSAVE_clusterx = []
-        self.TOSAVE_clustery = []
-        self.TOSAVE_WPx = []
-        self.TOSAVE_WPy = []
+        #self.fig, self.ax = plt.subplots()
 
 
     def wait_for_transform(self, from_frame, to_frame):
@@ -76,7 +86,6 @@ class sss_detection_listener:
                 trans = self.tf_buffer.lookup_transform(to_frame, from_frame, rospy.Time())
             except (tf2_ros.LookupException, tf2_ros.ConnectivityException,tf2_ros.ExtrapolationException) as error:
                 print('Failed to transform. Error: {}'.format(error))
-                print('from_frame: {}, to_frame: {}, current time: {}'.format(from_frame, to_frame, rospy.Time.now()))
         return trans
 
     def raw(self,msg):
@@ -111,8 +120,10 @@ class sss_detection_listener:
             object_pose = self.transform_pose(object_pose, from_frame=object_frame_id, to_frame=to_frame)
 
             if object_id == ObjectID.ROPE.value:
+                #print('1')
                 # print('Detected rope at frame {}, pose {}, with confidence {}'.format(
-                #      object_frame_id, object_pose, detection_confidence))
+                #     object_frame_id, object_pose, detection_confidence))
+                # Do whatever you want to do
                 self.rope_pose_x.append(object_pose.pose.position.x)
                 self.rope_pose_y.append(object_pose.pose.position.y)
                 self.detection_x.append(object_pose.pose.position.x)
@@ -121,7 +132,7 @@ class sss_detection_listener:
             if not object_id == ObjectID.ROPE.value:
                 self.detection_x.append(None)
                 self.detection_y.append(None)
-                #self.publish_waypoint_switch()
+                self.publish_waypoint_switch()
             if object_id == ObjectID.BUOY.value:
                 pass
                 # print('Detected buoy at frame {}, pose {}, with confidence {}'.format(
@@ -132,66 +143,157 @@ class sss_detection_listener:
                 #    object_frame_id, object_pose, detection_confidence))
 
     def publish_waypoint_switch(self):
-        if len(self.detection_x) < 50:
-            rospy.loginfo('Not enough detections')
+        #if len(self.rope_pose_x) > 20:
+        #print('in publish_waypoint_switch')
+        if len(self.detection_x) < 30:
+            print('here1')
             pass
         else:
-            for i in range(50):
+            print('here2')
+            for i in range(30):
                 if self.detection_x[-i] == None:
                     self.no_detection += 1
-            if self.no_detection > 40:
-                rospy.loginfo('Not enough rope detections in the last 50 detections')
+            if self.no_detection > 25:
+                print('here3')
                 self.no_detection = 0
+                self.enable.data = False
+                self.enable_pub.publish(self.enable)
                 pass
             else:
-                rospy.loginfo('Sufficient rope detections!')
                 self.no_detection = 0
                 self.publish_waypoint()
 
     def publish_waypoint(self):
-        rospy.loginfo('Calculating WP...')
         self.counter += 1
 
-        # cluster rope detections
-        clusters = self.cluster_detections()
+        if len(self.rope_pose_x) <=  50 and len(self.rope_pose_x) >= 10:
+            if self.clustering_flag == False:
+                X_noclustering= np.array(self.rope_pose_x)
+                y_noclustering= np.array(self.rope_pose_y)
+            else:
+                X = [[x, y] for x, y in zip(self.rope_pose_x, self.rope_pose_y)]
+        else: 
+            if self.clustering_flag == False:
+                X_noclustering = np.array(self.rope_pose_x[-50:])
+                y_noclustering = np.array(self.rope_pose_y[-50:])
+            else:
+                X = [[x, y] for x, y in zip(self.rope_pose_x[-50:], self.rope_pose_y[-50:])]
 
-        # select cluster closest to AUV
-        closest_cluster = self.select_closest_cluster(clusters)
+        if self.clustering_flag == True:
+            kmeans = KMeans(n_clusters=2, random_state=0).fit(X)
+            prediction_class = kmeans.predict(X)
+            for km in range(len(X)):
+                if prediction_class[km] == 0:
+                    self.class0.append(X[km])
+                if prediction_class[km] == 1:
+                    self.class1.append(X[km])
 
-        #if len(closest_cluster[0]) <=  50 and len(closest_cluster[1]) >= 10:
-        X,y = closest_cluster
-            #print('self.rope_pose: {}'.format(self.rope_pose))
-        #else: 
-            #X= np.array(self.rope_pose_x[-50:])
-            #print('self.rope_pose: {}'.format(self.rope_pose))
+            X0, y0 = zip(*self.class0)
+            X1, y1 = zip(*self.class1)
+        #convert into array (necessary format for ransac)
+            X0 = np.array(X0)
+            y0 = np.array(y0)
+            X1 = np.array(X1)
+            y1 = np.array(y1)
 
-        ransac=linear_model.RANSACRegressor()
-        Xr=np.array(X).reshape(-1,1)
-        ransac.fit(Xr,y)
-        inlier_mask = ransac.inlier_mask_
-        outlier_mask = np.logical_not(inlier_mask)
-        yr=ransac.predict(Xr)
-        max_x=max(Xr)
-        min_x=min(Xr)
-        maximum = np.max(Xr)
-        minimum = np.min(Xr)
-        max_xindex = np.where(Xr==maximum)[0]
-        min_xindex = np.where(Xr==minimum)[0]
-        m_slope=(yr[max_xindex[0]]-yr[min_xindex[0]])/(Xr[max_xindex[0]]-Xr[min_xindex[0]])
-        c_intercept=yr[max_xindex[0]]-m_slope*Xr[max_xindex[0]]
+            slope0, c0 = self.ransac_slope(X0, y0)
+            slope1, c1 = self.ransac_slope(X1, y1)
+
+            if (self.slope_algae_rope - slope0) < (self.slope_algae_rope - slope1):
+                m_slope = slope0
+                c_intercept = c0
+            else:
+                m_slope = slope1
+                c_intercept = c1
+        else:
+            m_slope, c_intercept = self.ransac_slope(X_noclustering, y_noclustering)
+        print('SLOPE OF LINE',m_slope)
+        print('SLOPE OF KRISTINEBERGS ALGAE ROPE',self.slope_algae_rope)
+
+        #if (self.slope_algae_rope - m_slope) > 1:
+            #return
         
         # get pose of SAM
         x_auv=self.current_pose.pose.position.x
         y_auv=self.current_pose.pose.position.y
         auv_yaw=self.rawr*180/math.pi
-                
-        # caulate waypoint      
+  
+        Waypoint_x, Waypoint_y = self.calculate_waypoint(x_auv, y_auv, auv_yaw, m_slope, c_intercept)
+        print('counter',self.counter)
+        print('wp',Waypoint_x)
+
+        self.wp_x.append(float(Waypoint_x))
+        self.wp_y.append(float(Waypoint_y))
+        #msg.pose.pose.position.x = float(Waypoint_x)
+        #msg.pose.pose.position.y = float(Waypoint_y)
+        
+        #msg.pose = self.rope_pose[-1]
+
+        #msg.pose.pose.orientation.x = 0
+        #msg.pose.pose.orientation.y = 0
+
+
+        if self.counter % 10 == 0:
+            msg = GotoWaypoint()
+            msg.travel_depth = -1
+            msg.goal_tolerance = 2
+            msg.z_control_mode = GotoWaypoint.Z_CONTROL_DEPTH
+            #msg.speed_control_mode = GotoWaypoint.SPEED_CONTROL_RPM
+            #msg.travel_rpm = 1000
+            msg.speed_control_mode = GotoWaypoint.SPEED_CONTROL_SPEED
+            msg.travel_speed = 1.0
+            msg.pose.header.frame_id = 'utm'
+            msg.pose.header.stamp = rospy.Time(0)
+
+            msg.pose.pose.position.x = np.mean(self.wp_x)
+            msg.pose.pose.position.y = np.mean(self.wp_y)
+        #msg.pose.pose.position.x = Waypoint_x
+        #msg.pose.pose.position.y = Waypoint_y
+            self.waypoint_pub.publish(msg)
+            print('PUBLISHED WAYPOINT')
+            print(msg)
+            #self.ax.scatter(msg.pose.pose.position.x,msg.pose.pose.position.y)
+            #self.fig.show()
+        #if self.counter % 10 == 0:
+            self.wp_x = []
+            self.wp_y = []
+
+        self.enable.data = True
+        self.enable_pub.publish(self.enable)
+
+    def ransac_slope(self, X, y):
+        ransac=linear_model.RANSACRegressor()
+        Xr=X.reshape(-1,1)
+        #print(Xr[0])
+        print('Xr',Xr)
+        ransac.fit(Xr,y)
+        inlier_mask = ransac.inlier_mask_
+        outlier_mask = np.logical_not(inlier_mask)
+        yr=ransac.predict(Xr)
+        max_x=max(Xr)
+        #max_xindex=Xr.index(max(Xr))
+        min_x=min(Xr)
+        #min_xindex=Xr.index(min(Xr))
+        maximum = np.max(Xr)
+        minimum = np.min(Xr)
+        #print('maximum:{}'.format(maximum))
+        max_xindex = np.where(Xr==maximum)[0]
+        min_xindex = np.where(Xr==minimum)[0]
+        print('max_xindex:{}'.format(max_xindex[0]))
+        m_slope=(yr[max_xindex[0]]-yr[min_xindex[0]])/(Xr[max_xindex[0]]-Xr[min_xindex[0]])
+        c_intercept=yr[max_xindex[0]]-m_slope*Xr[max_xindex[0]]
+
+        return m_slope, c_intercept
+
+    def calculate_waypoint(self, x_auv, y_auv, auv_yaw, m_slope, c_intercept):
         if m_slope<20 and m_slope>-20:
             x_distanGo=5/(1+m_slope**2)
             if y_auv > m_slope*x_auv + c_intercept:
                 c_move=c_intercept+3*(1+m_slope**2)**0.5
             else:
                 c_move=c_intercept-3*(1+m_slope**2)**0.5
+            # ax+by+c m,n
+            # ((b*b*m-a*b*n-a*c)/(a*a+b*b),(a*a*n-a*b*m-b*c)/(a*a+b*b))
             vpoint_x=(x_auv+m_slope*y_auv-m_slope*c_move)/(m_slope*m_slope+1)
             vpoint_y=(m_slope*m_slope*y_auv+m_slope*x_auv+c_move)/(m_slope*m_slope+1)
             if auv_yaw > 180:
@@ -208,6 +310,7 @@ class sss_detection_listener:
                 c_move=c_intercept+3*(1+m_slope**2)**0.5
             else:
                 c_move=c_intercept-3*(1+m_slope**2)**0.5
+            #vpoint=(x_auv+m_slope*y_auv-m_slope*c_move)/(m_slope*m_slope+1)
             vpoint_x=(x_auv+m_slope*y_auv-m_slope*c_move)/(m_slope*m_slope+1)
             vpoint_y=(m_slope*m_slope*y_auv+m_slope*x_auv+c_move)/(m_slope*m_slope+1)
             if auv_yaw < 90 or auv_yaw > 270:
@@ -216,121 +319,8 @@ class sss_detection_listener:
             else:
                 Waypoint_x=(x_togo)*2/3+vpoint_x
                 Waypoint_y=-(y_togo)*2/3+vpoint_y
-        print('wp',Waypoint_x)
 
-        self.wp_x.append(float(Waypoint_x))
-        self.wp_y.append(float(Waypoint_y))
-
-
-        #if self.counter % 10 == 0:
-        msg = GotoWaypoint()
-        msg.travel_depth = -1
-        msg.goal_tolerance = 2
-        msg.z_control_mode = GotoWaypoint.Z_CONTROL_DEPTH
-        #msg.speed_control_mode = GotoWaypoint.SPEED_CONTROL_RPM
-        #msg.travel_rpm = 1000
-        msg.speed_control_mode = GotoWaypoint.SPEED_CONTROL_SPEED
-        msg.travel_speed = 1.0
-        msg.pose.header.frame_id = 'utm'
-        msg.pose.header.stamp = rospy.Time(0)
-
-        # msg.pose.pose.position.x = np.mean(self.wp_x)
-        # msg.pose.pose.position.y = np.mean(self.wp_y)
-
-        self.list_wp_x.append(msg.pose.pose.position.x)
-        self.list_wp_y.append(msg.pose.pose.position.y)
-        self.list_x.append(x_auv)
-        self.list_y.append(y_auv)
-
-        msg.pose.pose.position.x = Waypoint_x
-        msg.pose.pose.position.y = Waypoint_y
-
-        self.waypoint_pub.publish(msg)
-        rospy.loginfo('PUBLISHED WAYPOINT')
-        print(msg)
-        self.wp_x = []
-        self.wp_y = []
-
-        self.TOSAVE_AUVx.append(self.current_pose.pose.position.x)
-        self.TOSAVE_AUVy.append(self.current_pose.pose.position.y)
-        self.TOSAVE_clusterx = X
-        self.TOSAVE_clustery = y
-        self.TOSAVE_ROPEx = self.rope_pose_x
-        self.TOSAVE_ROPEy = self.rope_pose_y
-        self.TOSAVE_WPx.append(msg.pose.pose.position.x)
-        self.TOSAVE_WPy.append(msg.pose.pose.position.y)
-
-        print('TOSAVE_AUVx = ' + ', '.join(map(str, self.TOSAVE_AUVx)))
-        print('TOSAVE_AUVy = ' + ', '.join(map(str, self.TOSAVE_AUVy)))
-        print('TOSAVE_ROPEx = ' + ', '.join(map(str, self.TOSAVE_ROPEx)))
-        print('TOSAVE_ROPEy = ' + ', '.join(map(str, self.TOSAVE_ROPEy)))
-        print('TOSAVE_CLUSTERx = ' + ', '.join(map(str, self.TOSAVE_clusterx)))
-        print('TOSAVE_CLUSTERy = ' + ', '.join(map(str, self.TOSAVE_clustery)))
-        print('TOSAVE_WPx = ' + ', '.join(map(str, self.TOSAVE_WPx)))
-        print('TOSAVE_WPy = ' + ', '.join(map(str, self.TOSAVE_WPy)))
-
-        self.enable.data = True
-        self.enable_pub.publish(self.enable)
-
-    def cluster_detections(self):
-        # compute distance between all pairs of detections
-        distances = []
-        for i in range(len(self.rope_pose_x)):
-            for j in range(i+1, len(self.rope_pose_x)):
-                dx = self.rope_pose_x[i] - self.rope_pose_x[j]
-                dy = self.rope_pose_y[i] - self.rope_pose_y[j]
-                distances.append((i, j, np.sqrt(dx**2 + dy**2)))
-
-        # sort distances in ascending order
-        distances.sort(key=lambda x: x[2])
-
-        # initialize clusters with each detection as a separate cluster
-        clusters = [[ropex,ropey] for ropex,ropey in zip(self.rope_pose_x, self.rope_pose_y)]
-
-        # MAD (Median Absolute Deviation) method for determining the threshold distance for merging clusters
-        # median_x = np.median(self.rope_pose_x)
-        # median_y = np.median(self.rope_pose_y)
-        # mad_x = np.median(np.abs(self.rope_pose_x - median_x))
-        # mad_y = np.median(np.abs(self.rope_pose_y - median_y))
-        # mad = np.sqrt(mad_x**2 + mad_y**2)
-
-        d_distances = [d[2] for d in distances]
-        median_distance = np.median(d_distances)
-        mad = np.median([np.abs(d - median_distance) for d in d_distances])
-
-        # merge clusters that are close enough
-        merge_distance = np.mean(d_distances) # 2*mad  # threshold distance for merging clusters
-        for i, j, d in reversed(distances):
-            print('d')
-            print(d)
-            print('merge_distance')
-            print(merge_distance)
-            if d > merge_distance:
-                break
-            clusters.append(clusters[i] + clusters[j])
-            clusters.pop(i)
-            clusters.pop(j-1)
-        print('CLUSTERS')
-        print(np.shape(clusters))
-        return clusters
-
-
-    def select_closest_cluster(self, clusters):
-        # select cluster with centroid closest to AUV
-        min_distance = float('inf')
-        closest_cluster = clusters[0] # initialize with first cluster
-        for cluster in clusters:
-            if len(cluster) <= 4:  # skip clusters with only a single element, deletes outliers
-                continue
-            cluster_x, cluster_y = cluster
-            dx = self.current_pose.pose.position.x - np.mean(cluster_x)
-            dy = self.current_pose.pose.position.y - np.mean(cluster_y)
-            distance = np.sqrt(dx**2 + dy**2)
-            if distance < min_distance:
-                min_distance = distance
-                closest_cluster = cluster
-        return closest_cluster
-
+        return Waypoint_x, Waypoint_y
 
 def main():
     rospy.init_node('sss_detection_listener', anonymous=True)

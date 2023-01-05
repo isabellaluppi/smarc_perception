@@ -10,6 +10,13 @@ from cv_bridge import CvBridge, CvBridgeError
 from sss_object_detection.consts import ObjectID, Side
 from sss_object_detection.cpd_detector import CPDetector
 
+from rospy.numpy_msg import numpy_msg
+from rospy_tutorials.msg import Floats
+
+from PIL import Image as ImagePIL
+from PIL import ImageEnhance
+from scipy import ndimage, misc
+
 
 class SSSDetector:
     def __init__(self, robot_name, water_depth=15, object_height=0):
@@ -33,6 +40,13 @@ class SSSDetector:
         self.resolution = 0.05
         self.channel_size = 1000
         self.water_depth = water_depth
+
+
+        self.ping_before = 0
+        self.ping_after = 0
+
+
+        self.pub = rospy.Publisher('floats', Sidescan, queue_size=10)
 
         # Detection visualization
         self.bridge = CvBridge()
@@ -59,6 +73,25 @@ class SSSDetector:
         self.vehicle_z_pos = msg.data
 
     def _sidescan_callback(self, msg):
+        
+        # port = msg.port_channel
+        # ping = ndimage.median_filter(port, size=40)       
+        # ping_image = ImagePIL.fromarray(ping)
+        # enhancer = ImageEnhance.Contrast(ping_image)
+        # factor = 1.5 #increase contrast
+        # ping_image_enhanced = enhancer.enhance(factor)
+        # ping = np.asarray(ping_image_enhanced)
+        # msg.port_channel = ping
+
+        # starboard = msg.starboard_channel
+        # ping = ndimage.median_filter(port, size=40)       
+        # ping_image = ImagePIL.fromarray(ping)
+        # enhancer = ImageEnhance.Contrast(ping_image)
+        # factor = 1.5 #increase contrast
+        # ping_image_enhanced = enhancer.enhance(factor)
+        # ping = np.asarray(ping_image_enhanced)
+        # msg.starboard_channel = ping
+
         channel_to_np = lambda channel: np.array(bytearray(channel),
                                                  dtype=np.uint8)
         channels = {
@@ -77,8 +110,17 @@ class SSSDetector:
 
         for channel_id, channel in channels.items():
             ping = channel
-
-            detection_res = self.detector.detect(ping)
+            #self.pub.publish(ping)
+            detection_res, self.ping_before, self.ping_after = self.detector.detect(ping)
+            self.ping_after = bytes(self.ping_after)
+            if channel_id == Side.PORT:
+                msg = Sidescan()
+                #self.ping_after = self.ping_after.tolist()
+                msg.port_channel = self.ping_after
+            if channel_id == Side.STARBOARD:
+                msg = Sidescan()
+                msg.starboard_channel = self.ping_after
+            self.pub.publish(msg)
 
             if detection_res:
                 detection_msg = self._construct_detection_msg_and_update_detection_image(
@@ -145,3 +187,6 @@ class SSSDetector:
         if channel_id == Side.PORT:
             detected_pose.position.y *= -1
         return detected_pose
+
+    def return_ping(self):
+        return self.ping_before, self.ping_after
